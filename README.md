@@ -7,7 +7,9 @@ Finds good investments in the game OSRS
 
 > python run.py
 
-(Parameters and config are implemented as constants in run.py)
+*(Parameters and config are implemented as constants in run.py)*
+
+## Details
 
 The program finds the list of all tradeable items and their price and volume history using the [Weird Gloop API](https://api.weirdgloop.org/).
 
@@ -21,9 +23,16 @@ A number of features are used to estimate these properties.
 
 Note that some fundamental knowledge is recommended in order to use the algorithm, as items have dropped in price due to a recent game update may not recover.
 
-Paste in some pics.
+![](https://github.com/sthoresen/osrs-trends/blob/main/backtest_plot.png)
 
-In progress
+
+The relatioship between feature scoring and simulated backtested returns
+
+
+<img src="https://github.com/sthoresen/osrs-trends/blob/main/coal.png" width="50%" alt="Identification of extremal and zero points" />
+Identification of extremal and zero points
+
+## In progress
 
 * Use long term historic volume to get more realistic backtesting results by simulating slippage.
 * Use higher frequency trading data, available for recent dates, to calculate intra-day volatility and get better entry/exit prices
