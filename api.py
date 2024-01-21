@@ -41,7 +41,16 @@ def get_recent_vol_and_price(id):
     url = URL_90D_BASE + f'{id}' + URL_90D_TAIL
     req = Request(url=url, headers=HEADERS)
     html = urlopen(req).read()
-    j = json.loads(html)[f'{id}']
+    j = json.loads(html)
+    #if id == 24609 or id == '24609':
+    #print(id)
+    print(j)
+    #print(type(j))
+    if 'error' in j.keys() and j['error'] == 'No results returned':
+        return None, None
+    j = j[f'{id}']
+    if not j:
+        return None, None
 
     volums = []
     prices = []
@@ -57,11 +66,12 @@ def get_recent_vol_and_price(id):
 
 
 # Pull price data for a given id
-def get_data_for_id(id):
+def get_data_for_id(id, url=None):
     if isinstance(id, int):
         id = f'{id}'
 
-    url = URL_ALL_BASE + id + URL_ALL_TAIL
+    if url == None:
+        url = URL_ALL_BASE + id + URL_ALL_TAIL
 
     req = Request(url=url, headers=HEADERS)
     html = urlopen(req).read()
@@ -69,12 +79,35 @@ def get_data_for_id(id):
 
     prices = []
     timestamps = []
+    vol = []
     for day in j:
         prices.append(day[1])
         timestamps.append( datetime.datetime.fromtimestamp( int(day[0]) / 1e3) )
+        if len(day) < 3 or day[2] == None:
+            vol.append(-1)
+        else:
+            vol.append(day[2])
     
     prices_n = np.empty(len(prices)).astype('int32')
+    vol_n = np.empty(len(vol)).astype('int32')
     for i, p in enumerate(prices):
         prices_n[i] = p
+        vol_n[i] = vol[i]
             
-    return (prices_n, timestamps)
+    return (prices_n, timestamps, vol_n)
+
+
+# Pull price data for a given id, but only the most recent 90 days
+def get_data_for_id_90d(id):
+    if isinstance(id, int):
+        id = f'{id}'
+
+    url = URL_90D_BASE + id + URL_90D_TAIL
+    return get_data_for_id(id, url=url)
+
+
+
+#Find the latest timestamp within the /all data history
+def get_latest_timestamp():
+    p, t, v = get_data_for_id(453) #Coal
+    return t[-1]
