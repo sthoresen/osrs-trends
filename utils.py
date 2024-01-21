@@ -7,7 +7,7 @@ import pickle
 import sys
 
 #Remove dates that are over age_limit old from backtest_data.
-def util_filter_dates(age_limit, item_price, item_dates, backtest_date):
+def util_filter_dates(age_limit, item_price, item_dates, vol, backtest_date):
 
     start_date = datetime.datetime.now()
     if backtest_date != -1:
@@ -23,17 +23,18 @@ def util_filter_dates(age_limit, item_price, item_dates, backtest_date):
             dates.append(d)
 
     price = (mask*item_price)[np.nonzero(mask*item_price)]
-    return (price, dates)
+    v = (mask*vol)[np.nonzero(mask*vol)]
+    return (price, dates, v)
 
 #Return a dict with price data sorted into different time periods
-def util_get_period_pricing(prices, timestamps, backtest_date=-1):
+def util_get_period_pricing(prices, timestamps, vol, backtest_date=-1):
     r = {}
-    r['1month'] = util_filter_dates(30, prices, timestamps, backtest_date)
-    r['3month'] = util_filter_dates(90, prices, timestamps, backtest_date)
-    r['6month'] = util_filter_dates(182, prices, timestamps, backtest_date)
-    r['12month'] = util_filter_dates(365, prices, timestamps, backtest_date)
-    r['24month'] = util_filter_dates(730, prices, timestamps, backtest_date)
-    r['all'] = (prices, timestamps)
+    r['1month'] = util_filter_dates(30, prices, timestamps, vol, backtest_date)
+    r['3month'] = util_filter_dates(90, prices, timestamps, vol, backtest_date)
+    r['6month'] = util_filter_dates(182, prices, timestamps, vol, backtest_date)
+    r['12month'] = util_filter_dates(365, prices, timestamps, vol, backtest_date)
+    r['24month'] = util_filter_dates(730, prices, timestamps, vol, backtest_date)
+    r['all'] = (prices, timestamps, vol)
     return r
 
 
@@ -61,7 +62,7 @@ def util_cache_get(filename):
 
 #cut off latest dates to have a last date further back in time
 def util_adjust_period_pricing(period_pricing, last_date):
-    p, t = period_pricing['all']
+    p, t, v = period_pricing['all']
     i = 0
     for i in range(len(t)):
         if t[i] > last_date:
@@ -71,8 +72,9 @@ def util_adjust_period_pricing(period_pricing, last_date):
 
     p = p[0:i-1]
     t = t[0:i-1]
+    v = v[0:i-1]
 
-    return util_get_period_pricing(p, t, backtest_date=t[-1])
+    return util_get_period_pricing(p, t, v, backtest_date=t[-1])
 
 
 #Progress bar like print start

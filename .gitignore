@@ -2,5 +2,9 @@
 *.json
 *.ipynb
 *.dat
+*.png
+!backtest_plot.png
 cache/
 __pycache__/
+testing.py
+__init__.py

@@ -6,6 +6,7 @@ import matplotlib.dates
 from utils import util_cache_get, util_cache_store, util_get_period_pricing
 import utils
 from api import get_data_for_id
+import history_bank.history_db as history_bank
 
 '''
 Simple code do determine if the item is worthy of an investment.
@@ -118,38 +119,53 @@ def plot_avg_line(item_price, item_dates):
     plt.plot(plt_dates, mean_line, 'r-', linewidth=1)
 
 #Calculate the crossing points between the price and the average price line
-def get_crossing_points(item_price, item_dates):
+def get_crossing_points(item_price, item_dates, margin):
     avg = get_avg_line_num(item_price, item_dates)
 
     over_line = item_price[0] > avg
     last_price = -1
+    max_since_last = item_price[0]
+    min_since_last = item_price[0]
     crossings = [] # index, price
     for i in range(item_price.size):
         price = item_price[i]
 
         if price > avg and not over_line:
             over_line = True
-            if last_price != avg:
-                crossings.append( (i, price, over_line) )
-            else:
-                crossings.append( (i-1, last_price, over_line) )
+
+            if(max_since_last/avg -1 >= margin or min_since_last/avg <= 1-margin ):
+                if last_price != avg:
+                    crossings.append( (i, price, over_line) )
+                else:
+                    crossings.append( (i-1, last_price, over_line) )
+
+            max_since_last = avg
+            min_since_last = avg
         elif price < avg and over_line:
             over_line = False
-            if last_price != avg:
-                crossings.append( (i, price, over_line) )
-            else:
-                crossings.append( (i-1, last_price, over_line) )
+
+            if(max_since_last/avg -1 >= margin or min_since_last/avg <= 1-margin ):
+                if last_price != avg:
+                    crossings.append( (i, price, over_line) )
+                else:
+                    crossings.append( (i-1, last_price, over_line) )
+
+            max_since_last = avg
+            min_since_last = avg
 
         last_price = price
+        if price > max_since_last: max_since_last = price
+        if price < min_since_last: min_since_last = price
 
     return crossings
 
 #Calculates top and bottom points for the price data
-def get_extreme_points(item_price, item_dates):
+def get_extreme_points(item_price, item_dates, MARGIN):
     #Use the list of crossings. Calculate max and min value between points
     #Difference from mean determines whether it is a top or bottom point
     extremes = []
-    crossings = get_crossing_points(item_price, item_dates)
+    avg = get_avg_line_num(item_price, item_dates)
+    crossings = get_crossing_points(item_price, item_dates, MARGIN)
     last_crossing = -1
     for c in crossings:
         if last_crossing == -1:
@@ -160,7 +176,7 @@ def get_extreme_points(item_price, item_dates):
         curve_start = last_crossing[0]
         min = np.min(item_price[curve_start:curve_end])
         max = np.max(item_price[curve_start:curve_end])
-        is_top = last_crossing[2]
+        is_top = bool(abs(max-avg) > abs(min-avg))
         value = max if is_top else min
         point = np.where(item_price[curve_start:curve_end] == value)
         point = point[0][0] + curve_start
@@ -169,22 +185,42 @@ def get_extreme_points(item_price, item_dates):
 
         last_crossing = c
 
+    if len(crossings) < 1: return extremes
+
+    #Add point before first crossing if possible
+    curve_end = crossings[0][0]
+    curve_start = 0
+
+    if curve_end-curve_start > 1:
+        min = np.min(item_price[curve_start:curve_end])
+        max = np.max(item_price[curve_start:curve_end])
+        is_top = bool(abs(max-avg) > abs(min-avg))
+        value = max if is_top else min
+        point = np.where(item_price[curve_start:curve_end] == value)
+        point = point[0][0] + curve_start
+        if(max/avg -1 >= MARGIN or min/avg <= 1-MARGIN ):
+            extremes.insert(0, (point, value, is_top))
+
+    #Add point after last crossing if possible
+        curve_end = len(item_price)
+        curve_start = crossings[-1][0]
+
+    if curve_end-curve_start > 1:
+        min = np.min(item_price[curve_start:curve_end])
+        max = np.max(item_price[curve_start:curve_end])
+        is_top = bool(abs(max-avg) > abs(min-avg))
+        value = max if is_top else min
+        point = np.where(item_price[curve_start:curve_end] == value)
+        point = point[0][0] + curve_start
+        if(max/avg -1 >= MARGIN or min/avg <= 1-MARGIN ):
+            extremes.append((point, value, is_top))
+
     return extremes
 
 
 # The number of times the price crossed the average price
-def get_n_cross(item_price, item_dates, extremes, min_move):
-    #min move is percent change required. eg 5% = 0.05
-    avg = get_avg_line_num(item_price, item_dates)
-    n_cross = 0
-    for e in extremes:
-        if not e[2]: # if bottom
-            continue
-        if e[1] >= avg*(min_move + 1):
-            n_cross += 1
-
-
-    return n_cross
+def get_n_cross(crossings):
+   return len(crossings)
 
 #average price of top
 def get_avg_top(item_price, item_dates, extremes, min_move):
@@ -239,26 +275,29 @@ def get_mean_dif(item_price, item_dates):
 
         
 
-def plot_crossing_points(item_price, item_dates):
+def plot_crossing_points(item_price, item_dates, MARGIN, noavg=False):
     plt_dates = matplotlib.dates.date2num(item_dates)
 
-    crossings = get_crossing_points(item_price, item_dates)
-    plot_avg_line(item_price, item_dates)
+    crossings = get_crossing_points(item_price, item_dates, MARGIN)
+    if not noavg:
+        plot_avg_line(item_price, item_dates)
     plt.plot( plt_dates[ [c[0] for c in crossings] ], [c[1] for c in crossings], 'bo')
 
-def plot_extreme_points(item_price, item_dates):
+def plot_extreme_points(item_price, item_dates, MARGIN):
     plt_dates = matplotlib.dates.date2num(item_dates)
 
-    extremes = get_extreme_points(item_price, item_dates)
+    extremes = get_extreme_points(item_price, item_dates, MARGIN)
     color_map = {False: 'r', True: 'g'}
     for e in extremes:
         plt.plot( plt_dates[e[0]], e[1], 'bo', color=color_map[e[2]] )
 
 
-def calculate_features(item_data, RESUME_FROM_API_FAIL, margin):
+def calculate_features(item_data, margin):
     '''
-    Calculates feature for all items in item_data by pulling price history and calling feature methods.
+    Calculates feature for all items in item_data by using the history bank and calling feature methods.
     '''
+
+    RESUME_FROM_API_FAIL = False
 
     total_iterations = len(item_data)
     if not RESUME_FROM_API_FAIL:
@@ -281,12 +320,10 @@ def calculate_features(item_data, RESUME_FROM_API_FAIL, margin):
             else:
                 caught_up = True
 
-        prices, timestamps = get_data_for_id(item['id'])
+        #prices, timestamps, vol = get_data_for_id(item['id'])
+        prices, timestamps, vol = history_bank.db[(item['id'])]
 
-        if len(prices) == 0:
-            raise Exception('API failure, exiting. Restart manually at latest id.')
-
-        period_pricing = util_get_period_pricing(prices, timestamps)
+        period_pricing = util_get_period_pricing(prices, timestamps, vol)
 
         #Check if no data for recent period
         skip_item = False
@@ -314,14 +351,15 @@ def calculate_features(item_data, RESUME_FROM_API_FAIL, margin):
         n_cross = []
         avg_top = []
         for key in period_pricing:
-            p, t = period_pricing[key]
+            p, t, v = period_pricing[key]
             highest_period.append( get_highest_period(p) )
             potential20.append( get_potential20(p, t) )
             max_profit.append( get_max_profit(p, t) )
             mean.append( get_avg_line_num(p, t) )
             mean_dif.append( get_mean_dif(p, t) )
 
-            extremes = get_extreme_points(p, t)
+            extremes = get_extreme_points(p, t, margin)
+            crossings = get_crossing_points(p, t, margin)
             precedent = get_precedent(p, t, extremes, current_price, margin)
             if precedent == None:
                 n_precedent.append( 0 )
@@ -330,7 +368,7 @@ def calculate_features(item_data, RESUME_FROM_API_FAIL, margin):
                 n_precedent.append( precedent[0] )
                 precedent_return.append( precedent[1] )
 
-            n_cross.append( get_n_cross(p, t, extremes, margin) )
+            n_cross.append( get_n_cross(crossings) )
             avg_top.append( get_avg_top(p, t, extremes, margin) )
         
         f = FeatureSet(item['id'], name, period_pricing, current_price, highest_1year, highest_period, potential20, max_profit, mean, margin, n_cross, avg_top, n_precedent, precedent_return, mean_dif)
@@ -369,7 +407,7 @@ def f_filter(f_list, f_mode, percentile=-1, potential20=False, mean_dif=False):
 
 def save_feature_list(f_list, FILTER_MODE, SORT_MODE, POTENTIAL20, PERCENTILE, top3=True):
 
-    with open('best_feature_data.txt', 'w') as fp:
+    with open('/home/sindre/osrs-trends/best_feature_data.txt', 'w') as fp:
         fp.write(f'Summary of best items found using filter_mode={FILTER_MODE}, sort_mode={SORT_MODE}, p={PERCENTILE},'
         f'potential20={POTENTIAL20}. Found {len(f_list)} items.\n')
 

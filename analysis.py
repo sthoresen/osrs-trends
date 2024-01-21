@@ -8,28 +8,47 @@ import api
 import utils
 import features
 
+
+#INVESTMENT_SIZE = 15*1000*1000 #15m gp
+VOLUME_SALE_LIMIT = 0.2 # Sell max this fraction of the volume myself.
+PRICE_IMPACT_PER_LIMIT = 0.05 # Adjust the effective price downwards by this percentage
+
 #Remove items with low liquidity or buy limits
 def filter_junk(item_data, vol_req, buy_lim_req):
-    f = IntProgress(min=0, max=len(item_data)) # instantiate the bar
-    display(f) # display the bar
+    #f = IntProgress(min=0, max=len(item_data)) # instantiate the bar
+    #display(f) # display the bar
+    data_len = len(item_data)
+    utils.util_progress_start(f'Filtering junk. Items: {data_len} ')
 
     VOL_REQ = 8000000
     BUY_LIM_REQ = 2000000
 
 
-    print(f"Length of dict pre junk-removal: {len(item_data)}")
+    print(f"Length of dict pre junk-removal: {data_len}")
 
     items_removed_by_both_reqs = []
     items_removed_by_volume_req = []
     items_removed_by_buy_limit_req = []
 
+    data_to_add = {}
+
+    iters = -1
     for id, item_info in item_data.items():
+        iters += 1
+        progress = iters/data_len
+        utils.util_progress_update(f'Progress: {round(progress*100, 1)}%. Detail: i {iters}/{data_len}')
         if 'limit' in item_info.keys():
             buy_limit = int(item_info["limit"])
         else: #Unkown buy limit
             buy_limit = -1
 
         vol, price = api.get_recent_vol_and_price(id)
+        if price == None:
+            name = item_info['name']
+            print(f'Note: id{id} ({name}) was ignored, not in the API')
+            items_removed_by_both_reqs.append(id)
+            continue
+
         vol_24h = vol*price
         if buy_limit == -1:
             buy_limit_gp_max = BUY_LIM_REQ + 10
@@ -42,9 +61,11 @@ def filter_junk(item_data, vol_req, buy_lim_req):
             items_removed_by_volume_req.append(id)
         elif buy_limit_gp_max < BUY_LIM_REQ:
             items_removed_by_buy_limit_req.append(id)
+        else:
+            #Newer addition. Save the vol data along
+            data_to_add[id] = vol_24h
 
-        f.value += 1
-        
+    utils.util_progress_end()
 
     print(len(items_removed_by_both_reqs))
     print(len(items_removed_by_volume_req))
@@ -78,9 +99,12 @@ def filter_junk(item_data, vol_req, buy_lim_req):
     for id in items_removed_by_buy_limit_req:
         data_no_junk.pop(id)
 
+    for id in data_no_junk.keys():
+        data_no_junk[id]['vol_stable'] = data_to_add[id]
+
     return data_no_junk
 
-def _get_exit_price(p,t,target, date_start, date_end):
+def _get_exit_price_deprecated(p,t,target, date_start, date_end):
     #Return target price if it is found in date range. If not, return the last price at the end (insta-sell)
     # Note: return value is tuple: price, days until exit
     p_trimmed = []
@@ -101,10 +125,102 @@ def _get_exit_price(p,t,target, date_start, date_end):
     # Insta sell: target not reached.
     return (p_trimmed[-1], (t_trimmed[-1] - t_trimmed[0]).days + 1)
 
+
+def _get_exit_price(p, t, v, target, date_start, date_end, BANKROLL, name=None):
+    # Start selling when the price reaches target
+    # Limit sell orders to 20% of volume each day
+    # If time reaches date_end, start selling maximum every day
+    # Report the average sale price.
+    p_trimmed = []
+    t_trimmed = []
+    v_trimmed = []
+    real_time_position_size = BANKROLL * 1000 * 1000
+    price_adj_factor = 1
+    sales = [] #tuples: volume, price
+    last_i = -1
+    last_correct_vol = -1
+    for i in range(len(t)):
+        if t[i] < date_start:
+            continue
+        if t[i] > date_end:
+            break
+        p_trimmed.append(p[i])
+        t_trimmed.append(t[i])
+        v_trimmed.append(v[i])
+        if last_correct_vol == -1 and v[i] != -1:
+            last_correct_vol = v[i]
+        last_i = i
+
+    days_to_exit = -1
+
+    for i in range(len(t_trimmed)):
+        price = p_trimmed[i]
+        if price*price_adj_factor >= target:
+            #Initiate a sale
+            total_v = v_trimmed[i]
+            if total_v == -1:
+                if last_correct_vol == -1:
+                    print(f'not able to get volume data! date start end = {date_start}, {date_end}. Item={name}')
+                    #raise Exception('Not able to get volume data!')
+                    total_v = 1
+                else:
+                    total_v = last_correct_vol
+            else:
+                last_correct_vol = total_v
+
+            sell_able = total_v*VOLUME_SALE_LIMIT*price*price_adj_factor
+            #print(f'first_sell_able ={sell_able}')
+            if sell_able >= real_time_position_size:
+                #print(f'Able to exit all! pos={real_time_position_size}')
+                sales.append((real_time_position_size, price*price_adj_factor))
+                days_to_exit = (t_trimmed[i] - t_trimmed[0]).days + 1
+                break
+            else:
+                #print(f'Only able to exit partially! pos={real_time_position_size}')
+                sales.append((sell_able, price*price_adj_factor))
+                real_time_position_size = real_time_position_size - sell_able
+                price_adj_factor = price_adj_factor - PRICE_IMPACT_PER_LIMIT
+
+
+
+    if days_to_exit == -1:
+        #print(f'starting force sales!')
+    # Was not able to sell in time. Start liquidating 20% of vol each day. Assume I can dump all on the 5th day if 
+    # I still haven't sold, as the price adj factor is really punishing at that point
+        for i in range(last_i+1, len(t)):
+            price = p[i]
+            total_v = v[i]
+            sell_able = total_v*VOLUME_SALE_LIMIT*price*price_adj_factor
+            if sell_able >= real_time_position_size:
+                    sales.append((real_time_position_size, price*price_adj_factor))
+                    days_to_exit = (t[i] - t_trimmed[0]).days + 1
+                    break
+            else:
+                sales.append((sell_able, price*price_adj_factor))
+                real_time_position_size = real_time_position_size - sell_able
+                price_adj_factor = price_adj_factor - PRICE_IMPACT_PER_LIMIT
+
+            if i >= last_i+5:
+                #print(f'Forcing liquidating at the last possible day! Oops')
+                sales.append((real_time_position_size, price*price_adj_factor))
+                days_to_exit = (t[i] - t_trimmed[0]).days + 1
+                break
+
+    return (_get_avg_price(sales), days_to_exit)
+
+
+def _get_avg_price(sales):
+    '''
+    sales = list of tuples: (volume, price)
+    '''
+    total_sales = sum(sale[0] for sale in sales)
+    return sum((sale[0]/total_sales)*sale[1] for sale in sales)
+
+
 '''
-Simulate trading strategy back in time (in order to estimate expected returns later)
+Simulate trading strategy back in time (in order to estimate expected returns later).
 '''
-def backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAST_SIM_DAY):
+def backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAST_SIM_DAY, BANKROLL, MARGIN):
    
     days_past = EARLIEST_SIM_START
     results = [] # list of tuples (f, score, actual backtest), backtest = (return, holding_time)
@@ -127,10 +243,10 @@ def backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAS
             if period_pricing_adj == -1 or len(period_pricing_adj['24month'][0]) < MIN_DAYS_TRADED:
                 continue
 
-            score_2y = features.get_n_cross(period_pricing_adj['24month'][0], period_pricing_adj['24month'][1],
-              features.get_extreme_points(period_pricing_adj['24month'][0], period_pricing_adj['24month'][1]), 0.02)
-            score_30d = features.get_n_cross(period_pricing_adj['1month'][0], period_pricing_adj['1month'][1],
-              features.get_extreme_points(period_pricing_adj['1month'][0], period_pricing_adj['1month'][1]), 0.02)
+            crossings2y = features.get_crossing_points(period_pricing_adj['24month'][0], period_pricing_adj['24month'][1], MARGIN)
+            crossings30d = features.get_crossing_points(period_pricing_adj['1month'][0], period_pricing_adj['1month'][1], MARGIN)
+            score_2y = features.get_n_cross(crossings2y)
+            score_30d = features.get_n_cross(crossings30d)
 
             if score_2y == None:
                 score_2y = (0,0)
@@ -153,8 +269,17 @@ def backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAS
             
             day_after_range = period_pricing_adj['1month'][1][-1] + timedelta(days=1)
             day_cutoff = period_pricing_adj['1month'][1][-1] + timedelta(days=90)
-            exit = _get_exit_price(f.period_pricing['all'][0], f.period_pricing['all'][1], mean_line_1month, day_after_range, day_cutoff)
             
+            #print(f'Starting exit calc for item={f.item}')
+            if len(BANKROLL) == 1:
+                exit = _get_exit_price(f.period_pricing['all'][0], f.period_pricing['all'][1], f.period_pricing['all'][2], mean_line_1month, day_after_range, day_cutoff, BANKROLL, name=f.item,)
+            else:
+                exit = []
+                for b in BANKROLL:
+                    e = _get_exit_price(f.period_pricing['all'][0], f.period_pricing['all'][1], f.period_pricing['all'][2], mean_line_1month, day_after_range, day_cutoff, b, name=f.item)
+                    exit.append(e)
+            #print(f'finalized exit calc! result={exit}')
+
             results.append((f.item, score, exit, features.get_current_price(period_pricing_adj['1month'][0]), mean_line_1month, score_2y, score_30d, period_pricing_adj['1month'][1][-1], f.id))
 
         days_past += SIM_SPACING
@@ -162,6 +287,23 @@ def backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAS
     utils.util_progress_end()
     return results
 
+
+'''
+Multiple backtests with different bankrolls
+'''
+'''
+def backtest_multi(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAST_SIM_DAY, BANKROLLS):
+   
+    results = []
+    loops = 1
+    for roll in BANKROLLS:
+        print(f'Performing backtest for bankroll {loops}/{len(BANKROLLS)}')
+        r = backtest(feature_list, EARLIEST_SIM_START, SIM_SPACING, MIN_DAYS_TRADED, LAST_SIM_DAY, roll)
+        results.append(r)
+        loops = loops + 1
+
+    return results
+'''
 
 def backtest_summary(backtested, DEBUG):
     '''
@@ -194,7 +336,7 @@ def backtest_summary(backtested, DEBUG):
     return (scores, returns, avg_per_score)
 
 
-def current_day_rankings(feature_list):
+def current_day_rankings(feature_list, MARGIN):
     '''
     Rank all items by current day score (what items are hot investments right now!), and sort.
     '''
@@ -202,11 +344,10 @@ def current_day_rankings(feature_list):
     current_day_rankings = []
     for f in feature_list:
         period_pricing = f.period_pricing
-        score_2y = features.get_n_cross(period_pricing['24month'][0], period_pricing['24month'][1],
-          features.get_extreme_points(period_pricing['24month'][0], period_pricing['24month'][1]), 0.02)
-
-        score_30d = features.get_n_cross(period_pricing['1month'][0], period_pricing['1month'][1],
-          features.get_extreme_points(period_pricing['1month'][0], period_pricing['1month'][1]), 0.02)
+        crossings2y = features.get_crossing_points(period_pricing['24month'][0], period_pricing['24month'][1], MARGIN)
+        crossings30d = features.get_crossing_points(period_pricing['1month'][0], period_pricing['1month'][1], MARGIN)
+        score_2y = features.get_n_cross(crossings2y)
+        score_30d = features.get_n_cross(crossings30d)
 
         if score_2y == None:
             score_2y = (0,0)
@@ -242,6 +383,9 @@ def numerical_score_investment_profile(scores, returns, current_score):
 
     #Sort scores high to low and keep returns linked still, index to index
     paired = [x for x in sorted(zip(scores,returns), key=lambda pair: pair[0], reverse=True)]
+    #print(paired)
+    #print(type(paired))
+    #print(len(paired))
     scores = list(zip(*paired))[0]
     returns = list(zip(*paired))[1]
 
@@ -260,7 +404,7 @@ def numerical_score_investment_profile(scores, returns, current_score):
     return sum(sampled_returns)/len(sampled_returns)
 
 
-def summary_table_current_day_rankings(current_day_rankings, backtested, item_data_no_junk, feature_list):
+def summary_table_current_day_rankings(current_day_rankings, backtested, item_data_no_junk, feature_list, bankroll_i=None):
 
     summary_table = []
     for fav in current_day_rankings:
@@ -270,7 +414,15 @@ def summary_table_current_day_rankings(current_day_rankings, backtested, item_da
         for r in backtested:
             if r[-1] == id:
                 scores.append(r[1])
-                returns.append( min(round((r[2][0]-r[3])/r[3]*100,2), 100) )
+                if bankroll_i is None:
+                    returns.append( min(round((r[2][0]-r[3])/r[3]*100,2), 100) )
+                else:
+                    returns.append( min(round((r[2][bankroll_i][0]-r[3])/r[3]*100,2), 100) )
+
+
+        #if len(scores) == 0:
+        #    print(f'Empty score!')
+        #    print(id)
 
         last_price = item_data_no_junk[id]['last']
         for f in feature_list:
@@ -278,8 +430,12 @@ def summary_table_current_day_rankings(current_day_rankings, backtested, item_da
                 median = f.avg_line_num[0]
                 break
 
+        if len(scores) != 0:
+            num = numerical_score_investment_profile(scores, returns, fav[0])
+        else:
+            #No backtesting results for item (likely a new item)
+            num = None
         
-        num = numerical_score_investment_profile(scores, returns, fav[0])
         summary_table.append((fav,num,last_price,median) )
 
     return sorted(summary_table, key=lambda x: x[1] if x[1] != None else -1000, reverse=True)
